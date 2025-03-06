@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/gridfs"
@@ -30,6 +31,22 @@ func getLocalIP() (string, error) {
 	return "", fmt.Errorf("no IPv4 address found")
 }
 
+func connectToDB() *mongo.Client {
+	clientOptions := options.Client().ApplyURI(mongoURI)
+	client, err := mongo.Connect(context.TODO(), clientOptions)
+	if err != nil {
+		fmt.Println("Error connecting to MongoDB:", err)
+		return nil
+	}
+	err = client.Ping(context.TODO(), nil)
+	if err != nil {
+		fmt.Println("Could not ping MongoDB:", err)
+		return nil
+	}
+	fmt.Println("Connected to MongoDB!")
+	return client
+}
+
 const mongoURI = "mongodb://localhost:27017"
 const databaseName = "fileStore"
 
@@ -49,24 +66,23 @@ func main() {
 	defer listener.Close()
 	fmt.Println("Server listening on port", port)
 
-	clientOptions := options.Client().ApplyURI(mongoURI)
-	client, err := mongo.Connect(context.TODO(), clientOptions)
-	if err != nil {
-		fmt.Println("Error connecting to MongoDB:", err)
-		return
-	}
-	err = client.Ping(context.TODO(), nil)
-	if err != nil {
-		fmt.Println("Could not ping MongoDB:", err)
-		return
-	}
-	fmt.Println("Connected to MongoDB!")
+	client := connectToDB()
+	defer client.Disconnect(context.TODO())
 
 	gridFSBucket, err := gridfs.NewBucket(client.Database(databaseName))
 	if err != nil {
 		fmt.Println("Error creating GridFS bucket:", err)
 		return
 	}
+
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, os.Interrupt)
+	go func() {
+		<-signalChan
+		listener.Close()
+		client.Disconnect(context.TODO())
+		os.Exit(0)
+	}()
 
 	for {
 		conn, err := listener.Accept()
@@ -76,38 +92,46 @@ func main() {
 		}
 		fmt.Println("Got connection from", conn.RemoteAddr())
 
-		var fileNameLen int32
-		if err := binary.Read(conn, binary.BigEndian, &fileNameLen); err != nil {
-			fmt.Println("Error reading filename length:", err)
-			conn.Close()
-			continue
-		}
-		fmt.Println("len of filename:", fileNameLen)
-
-		fileName := make([]byte, fileNameLen)
-		if _, err := io.ReadFull(conn, fileName); err != nil {
-			fmt.Println("Error reading filename:", err)
-			conn.Close()
-			continue
-		}
-
-		fmt.Printf("Receiving data for file: %s\n", fileName)
-
-		uploadStream, err := gridFSBucket.OpenUploadStream(string(fileName))
-		if err != nil {
-			fmt.Println("Error opening upload stream:", err)
-			conn.Close()
-			continue
-		}
-
-		_, err = io.Copy(uploadStream, conn)
-		if err != nil {
-			fmt.Println("Error uploading data:", err)
-		} else {
-			fmt.Println("Data received and uploaded successfully")
-		}
-
-		uploadStream.Close()
-		conn.Close()
+		go handleConnection(conn, gridFSBucket)
 	}
+}
+
+func handleConnection(conn net.Conn, bucket *gridfs.Bucket) {
+	defer conn.Close()
+	var fileNameLen int32
+	if err := binary.Read(conn, binary.BigEndian, &fileNameLen); err != nil {
+		fmt.Println("Error reading filename length:", err)
+		conn.Close()
+		return
+	}
+	if fileNameLen <= 0 || fileNameLen > 255 {
+		fmt.Println("Invalid filename length")
+		conn.Close()
+		return
+	}
+	fmt.Println("len of filename:", fileNameLen)
+
+	fileName := make([]byte, fileNameLen)
+	if _, err := io.ReadFull(conn, fileName); err != nil {
+		fmt.Println("Error reading filename:", err)
+		conn.Close()
+		return
+	}
+
+	fmt.Printf("Receiving data for file: %s\n", fileName)
+
+	uploadStream, err := bucket.OpenUploadStream(string(fileName))
+	if err != nil {
+		fmt.Println("Error opening upload stream:", err)
+		conn.Close()
+		return
+	}
+
+	_, err = io.Copy(uploadStream, conn)
+	if err != nil {
+		fmt.Println("Error uploading data:", err)
+	} else {
+		fmt.Println("Data received and uploaded successfully")
+	}
+	uploadStream.Close()
 }
