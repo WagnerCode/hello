@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/gridfs"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -96,7 +97,7 @@ func main() {
 	}
 }
 
-func handleConnection(conn net.Conn, bucket *gridfs.Bucket) {
+func handleConnection(conn net.Conn, gridFSBucket *gridfs.Bucket) {
 	defer conn.Close()
 	var fileNameLen int32
 	if err := binary.Read(conn, binary.BigEndian, &fileNameLen); err != nil {
@@ -118,9 +119,27 @@ func handleConnection(conn net.Conn, bucket *gridfs.Bucket) {
 		return
 	}
 
-	fmt.Printf("Receiving data for file: %s\n", fileName)
+	var clientIDLen int32
+	if err := binary.Read(conn, binary.BigEndian, &clientIDLen); err != nil {
+		fmt.Println("Error reading ClientID length:", err)
+		return
+	}
 
-	uploadStream, err := bucket.OpenUploadStream(string(fileName))
+	clientID := make([]byte, clientIDLen)
+	if _, err := io.ReadFull(conn, clientID); err != nil {
+		fmt.Println("Error reading ClientID:", err)
+		return
+	}
+
+	fmt.Printf("Receiving data for file: %s (ClientID: %s)\n", fileName, clientID)
+
+	opts := options.GridFSUpload().
+		SetMetadata(bson.D{{"clientID", string(clientID)}})
+
+	uploadStream, err := gridFSBucket.OpenUploadStream(
+		string(fileName),
+		opts,
+	)
 	if err != nil {
 		fmt.Println("Error opening upload stream:", err)
 		conn.Close()

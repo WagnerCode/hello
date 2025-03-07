@@ -40,7 +40,7 @@ func main() {
 	}
 
 	// Open the download stream
-	downloadStream, err := gridFSBucket.OpenDownloadStreamByName("2025-03-04_11:49:443.pdf")
+	downloadStream, err := gridFSBucket.OpenDownloadStreamByName("2025-03-05_09:11:513.pdf")
 	if err != nil {
 		fmt.Println("Error opening download stream:", err)
 		return
