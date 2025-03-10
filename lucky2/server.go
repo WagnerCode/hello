@@ -92,6 +92,7 @@ func main() {
 
 	http.HandleFunc("/download", downloadHandler)
 	http.HandleFunc("/", homePage)
+	http.HandleFunc("/files", filesListHandler)
 	httpServer := &http.Server{Addr: httpPort}
 	go func() {
 		fmt.Printf("HTTP server started on %s\n", httpPort)
@@ -215,4 +216,128 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error sending file", http.StatusInternalServerError)
 		return
 	}
+}
+
+func filesListHandler(w http.ResponseWriter, r *http.Request) {
+	// Подключаемся к MongoDB
+	client := connectToDB()
+	defer client.Disconnect(context.TODO())
+
+	// Получаем коллекцию GridFS
+	db := client.Database(databaseName)
+	filesCollection := db.Collection("fs.files") // Коллекция с метаданными файлов
+
+	// Выбираем все документы
+	cursor, err := filesCollection.Find(context.Background(), bson.M{})
+	if err != nil {
+		http.Error(w, "Error fetching files", http.StatusInternalServerError)
+		return
+	}
+	defer cursor.Close(context.Background())
+
+	// Собираем имена файлов
+	var filenames []string
+	for cursor.Next(context.Background()) {
+		var file struct {
+			Filename string `bson:"filename"`
+		}
+		if err := cursor.Decode(&file); err != nil {
+			http.Error(w, "Error decoding file", http.StatusInternalServerError)
+			return
+		}
+		filenames = append(filenames, file.Filename)
+	}
+
+	// Отображаем шаблон с списком файлов
+	tmpl := template.Must(template.New("files").Parse(`
+    <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Файл менеджер</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            background: #1a1a1a;
+            color: #f5f5f5;
+            margin: 0;
+            padding: 0;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 2rem auto;
+            padding: 2rem;
+            background: #2d2d2d;
+            border-radius: 10px;
+            box-shadow: 0 0 30px rgba(0,0,0,0.15);
+        }
+
+        h2 {
+            color: #3498db;
+            border-bottom: 3px solid #27ae60;
+            padding-bottom: 10px;
+            margin-bottom: 2rem;
+        }
+
+        ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        li {
+            background: #333;
+            margin: 10px 0;
+            padding: 15px;
+            border-radius: 5px;
+            transition: all 0.3s ease;
+        }
+
+        li:hover {
+            background: #444;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+
+        a {
+            color: #ffffff;
+            text-decoration: none;
+            font-weight: 500;
+        }
+
+        a:hover {
+            color: #3498db;
+        }
+
+        .back-link {
+            display: block;
+            text-align: center;
+            margin-top: 2rem;
+            padding: 10px 20px;
+            background: #27ae60;
+            border-radius: 5px;
+            transition: all 0.3s ease;
+        }
+
+        .back-link:hover {
+            background: #2ecc71;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Файл менеджер</h2>
+        <ul>
+            {{range .}}
+                <li><a href="/download?filename={{.}}">{{.}}</a></li>
+            {{end}}
+        </ul>
+        <a href="/" class="back-link">Назад</a>
+    </div>
+</body>
+</html>
+    `))
+	tmpl.Execute(w, filenames)
 }
