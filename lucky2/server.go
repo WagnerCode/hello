@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"html/template"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 
@@ -48,53 +50,60 @@ func connectToDB() *mongo.Client {
 	return client
 }
 
+const httpPort = ":5000"
 const mongoURI = "mongodb://localhost:27017"
 const databaseName = "fileStore"
 
 func main() {
-	port := ":55000"
-	localIP, err := getLocalIP()
-	if err != nil {
-		fmt.Println("Error getting local IP:", err)
-		return
-	}
+	go func() {
+		port := ":55000"
+		localIP, err := getLocalIP()
+		if err != nil {
+			fmt.Println("Error getting local IP:", err)
+			return
+		}
 
-	listener, err := net.Listen("tcp", localIP+port)
-	if err != nil {
-		fmt.Println("Error starting server:", err)
-		return
-	}
-	defer listener.Close()
-	fmt.Println("Server listening on port", port)
+		listener, err := net.Listen("tcp", localIP+port)
+		if err != nil {
+			fmt.Println("Error starting server:", err)
+			return
+		}
+		defer listener.Close()
+		fmt.Println("TCP Server listening on port", port)
 
-	client := connectToDB()
-	defer client.Disconnect(context.TODO())
+		client := connectToDB()
+		defer client.Disconnect(context.TODO())
 
-	gridFSBucket, err := gridfs.NewBucket(client.Database(databaseName))
-	if err != nil {
-		fmt.Println("Error creating GridFS bucket:", err)
-		return
-	}
+		gridFSBucket, err := gridfs.NewBucket(client.Database(databaseName))
+		if err != nil {
+			fmt.Println("Error creating GridFS bucket:", err)
+			return
+		}
+
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				fmt.Println("Error accepting connection:", err)
+				continue
+			}
+			go handleConnection(conn, gridFSBucket)
+		}
+	}()
+
+	http.HandleFunc("/download", downloadHandler)
+	http.HandleFunc("/", homePage)
+	httpServer := &http.Server{Addr: httpPort}
+	go func() {
+		fmt.Printf("HTTP server started on %s\n", httpPort)
+		if err := httpServer.ListenAndServe(); err != nil {
+			fmt.Println("HTTP server error:", err)
+		}
+	}()
 
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, os.Interrupt)
-	go func() {
-		<-signalChan
-		listener.Close()
-		client.Disconnect(context.TODO())
-		os.Exit(0)
-	}()
-
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			fmt.Println("Error accepting connection:", err)
-			continue
-		}
-		fmt.Println("Got connection from", conn.RemoteAddr())
-
-		go handleConnection(conn, gridFSBucket)
-	}
+	<-signalChan
+	fmt.Println("Shutting down...")
 }
 
 func handleConnection(conn net.Conn, gridFSBucket *gridfs.Bucket) {
@@ -153,4 +162,57 @@ func handleConnection(conn net.Conn, gridFSBucket *gridfs.Bucket) {
 		fmt.Println("Data received and uploaded successfully")
 	}
 	uploadStream.Close()
+}
+
+func homePage(w http.ResponseWriter, r *http.Request) {
+	tmpl := template.Must(template.New("home").Parse(`
+	<html>
+	<body>
+	<h2>Скачать файл</h2>
+	<form action="/download" method="GET">
+	Имя файла в базе данных: <input type="text" name="filename" required>
+	<input type="submit" value="Скачать">
+	</form>
+	</body>
+	</html>
+	`))
+	tmpl.Execute(w, nil)
+}
+
+func downloadHandler(w http.ResponseWriter, r *http.Request) {
+	filename := r.URL.Query().Get("filename")
+	if filename == "" {
+		http.Error(w, "Filename is required", http.StatusBadRequest)
+		return
+	}
+
+	// Подключаемся к MongoDB
+	client := connectToDB()
+	defer client.Disconnect(context.TODO())
+
+	gridFSBucket, err := gridfs.NewBucket(client.Database(databaseName))
+	if err != nil {
+		http.Error(w, "Error connecting to GridFS", http.StatusInternalServerError)
+		return
+	}
+
+	// Проверяем существование файла
+
+	// Скачиваем файл
+	downloadStream, err := gridFSBucket.OpenDownloadStreamByName(filename)
+	if err != nil {
+		http.Error(w, "Error opening file", http.StatusInternalServerError)
+		return
+	}
+	defer downloadStream.Close()
+
+	// Устанавливаем заголовки
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
+
+	// Отправляем данные
+	if _, err := io.Copy(w, downloadStream); err != nil {
+		http.Error(w, "Error sending file", http.StatusInternalServerError)
+		return
+	}
 }
