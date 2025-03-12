@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -89,10 +90,14 @@ func main() {
 			go handleConnection(conn, gridFSBucket)
 		}
 	}()
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+	})
+	http.HandleFunc("/login", loginHandler)
+	http.HandleFunc("/logout", logoutHandler)
+	http.Handle("/download", authMiddleware(http.HandlerFunc(downloadHandler)))
+	http.Handle("/files", authMiddleware(http.HandlerFunc(filesListHandler)))
 
-	http.HandleFunc("/download", downloadHandler)
-	http.HandleFunc("/", homePage)
-	http.HandleFunc("/files", filesListHandler)
 	httpServer := &http.Server{Addr: httpPort}
 	go func() {
 		fmt.Printf("HTTP server started on %s\n", httpPort)
@@ -165,21 +170,6 @@ func handleConnection(conn net.Conn, gridFSBucket *gridfs.Bucket) {
 	uploadStream.Close()
 }
 
-func homePage(w http.ResponseWriter, r *http.Request) {
-	tmpl := template.Must(template.New("home").Parse(`
-	<html>
-	<body>
-	<h2>Скачать файл</h2>
-	<form action="/download" method="GET">
-	Имя файла в базе данных: <input type="text" name="filename" required>
-	<input type="submit" value="Скачать">
-	</form>
-	</body>
-	</html>
-	`))
-	tmpl.Execute(w, nil)
-}
-
 func downloadHandler(w http.ResponseWriter, r *http.Request) {
 	filename := r.URL.Query().Get("filename")
 	if filename == "" {
@@ -227,7 +217,7 @@ func filesListHandler(w http.ResponseWriter, r *http.Request) {
 	db := client.Database(databaseName)
 	filesCollection := db.Collection("fs.files") // Коллекция с метаданными файлов
 
-	// Выбираем все документы
+	// Выбираем все документы d
 	cursor, err := filesCollection.Find(context.Background(), bson.M{})
 	if err != nil {
 		http.Error(w, "Error fetching files", http.StatusInternalServerError)
@@ -250,94 +240,260 @@ func filesListHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Отображаем шаблон с списком файлов
 	tmpl := template.Must(template.New("files").Parse(`
-    <!DOCTYPE html>
-<html lang="en">
+	<!DOCTYPE html>
+	<html lang="en">
+	<head>
+		<meta charset="UTF-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+		<title>Файл менеджер</title>
+		<style>
+			body {
+				font-family: 'Arial', sans-serif;
+				background: #1a1a1a;
+				color: #f5f5f5;
+				margin: 0;
+				padding: 0;
+			}
+	
+			.container {
+				max-width: 800px;
+				margin: 2rem auto;
+				padding: 2rem;
+				background: #2d2d2d;
+				border-radius: 10px;
+				box-shadow: 0 0 30px rgba(0,0,0,0.15);
+			}
+	
+			h2 {
+				color: #3498db;
+				border-bottom: 3px solid #27ae60;
+				padding-bottom: 10px;
+				margin-bottom: 2rem;
+			}
+	
+			ul {
+				list-style: none;
+				padding: 0;
+				margin: 0;
+			}
+	
+			li {
+				background: #333;
+				margin: 10px 0;
+				padding: 15px;
+				border-radius: 5px;
+				transition: all 0.3s ease;
+			}
+	
+			li:hover {
+				background: #444;
+				transform: translateY(-2px);
+				box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+			}
+	
+			a {
+				color: #ffffff;
+				text-decoration: none;
+				font-weight: 500;
+			}
+	
+			a:hover {
+				color: #3498db;
+			}
+	
+			.back-link {
+				display: block;
+				text-align: center;
+				margin-top: 2rem;
+				padding: 10px 20px;
+				background: #27ae60;
+				border-radius: 5px;
+				transition: all 0.3s ease;
+			}
+	
+			.back-link:hover {
+				background: #2ecc71;
+			}
+		</style>
+	</head>
+	<body>
+		<div class="container">
+			<h2>Файл менеджер</h2>
+			<ul>
+				{{range .}}
+					<li><a href="/download?filename={{.}}">{{.}}</a></li>
+				{{end}}
+			</ul>
+			<a href="/logout" class="back-link">Logout</a>
+		</div>
+	</body>
+	</html>
+    `))
+	tmpl.Execute(w, filenames)
+}
+
+func loginHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "GET" {
+		tmpl := template.Must(template.New("login").Parse(`
+        <!DOCTYPE html>
+<html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Файл менеджер</title>
+    <title>Авторизация</title>
     <style>
+        /* Фоновая градиентная оболочка */
         body {
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: linear-gradient(45deg, #2c3e50, #4a6572);
             font-family: 'Arial', sans-serif;
-            background: #1a1a1a;
-            color: #f5f5f5;
-            margin: 0;
-            padding: 0;
         }
 
-        .container {
-            max-width: 800px;
-            margin: 2rem auto;
-            padding: 2rem;
-            background: #2d2d2d;
-            border-radius: 10px;
-            box-shadow: 0 0 30px rgba(0,0,0,0.15);
-        }
-
-        h2 {
-            color: #3498db;
-            border-bottom: 3px solid #27ae60;
-            padding-bottom: 10px;
-            margin-bottom: 2rem;
-        }
-
-        ul {
-            list-style: none;
-            padding: 0;
-            margin: 0;
-        }
-
-        li {
-            background: #333;
-            margin: 10px 0;
-            padding: 15px;
-            border-radius: 5px;
-            transition: all 0.3s ease;
-        }
-
-        li:hover {
-            background: #444;
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
-        }
-
-        a {
-            color: #ffffff;
-            text-decoration: none;
-            font-weight: 500;
-        }
-
-        a:hover {
-            color: #3498db;
-        }
-
-        .back-link {
-            display: block;
+        /* Контейнер формы */
+        .login-container {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 15px;
+            padding: 40px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+            width: 350px;
             text-align: center;
-            margin-top: 2rem;
-            padding: 10px 20px;
-            background: #27ae60;
-            border-radius: 5px;
             transition: all 0.3s ease;
         }
 
-        .back-link:hover {
-            background: #2ecc71;
+        /* Заголовок */
+        h2 {
+            color: #ecf0f1;
+            font-weight: 700;
+            margin-bottom: 30px;
+            position: relative;
+        }
+
+        h2::before {
+            content: '';
+            position: absolute;
+            width: 100%;
+            height: 5px;
+            background: linear-gradient(90deg, #27ae60, #2ecc71);
+            bottom: -10px;
+            left: 0;
+            border-radius: 5px;
+        }
+
+        /* Поле ввода */
+        .input-field {
+            width: 100%;
+            padding: 12px;
+            margin: 15px 0;
+            background: rgba(255, 255, 255, 0.1);
+            border: none;
+            border-radius: 8px;
+            color: #ecf0f1;
+            font-size: 1em;
+            transition: all 0.3s ease;
+            outline: none;
+        }
+
+        .input-field:focus {
+            box-shadow: 0 0 10px rgba(39, 174, 96, 0.5);
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        /* Кнопка входа */
+        .login-btn {
+            width: 100%;
+            padding: 12px;
+            background: linear-gradient(90deg, #27ae60, #2ecc71);
+            border: none;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 1em;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .login-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(39, 174, 96, 0.5);
+        }
+
+        
+
+        /* Стили для ошибок */
+        .error {
+            color: #e74c3c;
+            margin-top: 10px;
+            font-size: 0.9em;
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h2>Файл менеджер</h2>
-        <ul>
-            {{range .}}
-                <li><a href="/download?filename={{.}}">{{.}}</a></li>
-            {{end}}
-        </ul>
-        <a href="/" class="back-link">Назад</a>
+    <div class="login-container">
+        <h2>Вход</h2>
+        <form action="/login" method="POST">
+            <input type="text" 
+                   name="username" 
+                   class="input-field" 
+                   placeholder="Логин" 
+                   required>
+            <input type="password" 
+                   name="password" 
+                   class="input-field" 
+                   placeholder="Пароль" 
+                   required>
+            <button type="submit" class="login-btn">Войти</button>
+        </form>
     </div>
 </body>
 </html>
-    `))
-	tmpl.Execute(w, filenames)
+        `))
+		tmpl.Execute(w, nil)
+		return
+	}
+	if r.Method == "POST" {
+		r.ParseForm()
+		username := r.FormValue("username")
+		password := r.FormValue("password")
+
+		if username == "root" && password == "root" {
+
+			cookie := &http.Cookie{
+				Name:     "auth",
+				Value:    "trueWithSimpleDefence",
+				Expires:  time.Now().Add(24 * time.Hour),
+				Path:     "/",
+				HttpOnly: true,
+			}
+			http.SetCookie(w, cookie)
+			http.Redirect(w, r, "/files", http.StatusSeeOther)
+			return
+		}
+
+		http.Error(w, "Неверный логин или пароль", http.StatusForbidden)
+	}
+}
+
+func authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie("auth")
+		if err != nil || cookie.Value != "trueWithSimpleDefence" {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func logoutHandler(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:   "auth",
+		Value:  "",
+		Path:   "/",
+		MaxAge: -1,
+	})
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
